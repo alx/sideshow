@@ -156,6 +156,11 @@ pre-styled controls instead of shipping its own, so it still comes out ahead.
 sideshow runs locally as a small Node server, or on Cloudflare Workers when your
 agent and your browser live on different machines (or you want the viewer on your
 phone). See **[docs/deploying.md](docs/deploying.md)**.
+The viewer's **push-to-talk** button records the _browsing device's_ microphone
+when the page is served over HTTPS (a secure context), and falls back to the
+server's mic otherwise. To reproduce the browser-mic setup — TLS proxy,
+certificate, systemd unit — see
+**[docs/browser-mic.md](docs/browser-mic.md)**.
 
 Each card's footer carries a **share** menu for taking a post elsewhere: copy its
 link, copy the whole post as markdown (`/api/posts/:id/markdown` — prose stays
@@ -176,6 +181,9 @@ browser, so the action is shown but disabled.
   detail: CLI, MCP, Pi, plain HTTP, and the Claude Code skill + plugin.
 - **[Deploying to Cloudflare](docs/deploying.md)** — run a shared, tokened
   instance.
+- **[Browser microphone over HTTPS](docs/browser-mic.md)** — serve the viewer
+  over HTTPS so push-to-talk records the mic of the device viewing it
+  (includes `contrib/tls-proxy.js`).
 - **[AGENTS.md](AGENTS.md)** — architecture and contributor guide.
 - **Terminal surface (alpha).** [`sideshow-term/`](sideshow-term/) is an early
   sibling that renders to a TUI instead of the browser. APIs are unstable.
