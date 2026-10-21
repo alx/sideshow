@@ -12,7 +12,7 @@
 // transcript + mp3 → handing the transcript to Pi (pi-sideshow-voice →
 // pi.sendUserMessage, the same path as pi-voicekit auto-submit).
 import { createSignal, onMount, onCleanup } from "solid-js";
-import { api } from "./api.ts";
+import { api, appPath } from "./api.ts";
 import { selected } from "./state.ts";
 
 type Phase = "idle" | "arming" | "starting" | "recording" | "working";
@@ -40,13 +40,23 @@ interface JobView {
 
 export function PushToTalk() {
   const [phase, setPhase] = createSignal<Phase>("idle");
-  const [stepLabel, setStepLabel] = createSignal("");
+  // The detailed step is surfaced on the voice card's footer (VoiceProgress);
+  // the button only needs to know it is "working", so the value side stays
+  // unread here (kept for a future in-button label).
+  const [_stepLabel, setStepLabel] = createSignal("");
   const [error, setError] = createSignal("");
   let holding = false;
   let armingTimer: ReturnType<typeof setTimeout> | null = null;
   let pollTimer: ReturnType<typeof setTimeout> | null = null;
   let settleTimer: ReturnType<typeof setTimeout> | null = null;
   let working = false;
+
+  // Browser-side capture state: when the page is on a secure context the mic
+  // belongs to THIS device (the one watching the board), not the server host.
+  let clientMode = false;
+  let mediaRecorder: MediaRecorder | null = null;
+  let mediaStream: MediaStream | null = null;
+  let recChunks: BlobPart[] = [];
 
   const label = () => {
     switch (phase()) {
@@ -77,18 +87,77 @@ export function PushToTalk() {
   const finish = (isError: boolean) => {
     clearTimers();
     working = false;
-    settleTimer = setTimeout(() => {
-      setPhase("idle");
-      setStepLabel("");
-      setError("");
-    }, isError ? ERROR_SHOW_MS : DONE_SHOW_MS);
+    settleTimer = setTimeout(
+      () => {
+        setPhase("idle");
+        setStepLabel("");
+        setError("");
+      },
+      isError ? ERROR_SHOW_MS : DONE_SHOW_MS,
+    );
+  };
+
+  const browserMicAvailable = () =>
+    isSecureContext &&
+    !!navigator.mediaDevices?.getUserMedia &&
+    typeof MediaRecorder !== "undefined";
+
+  const pickMimeType = (): string | undefined => {
+    const candidates = [
+      "audio/webm;codecs=opus",
+      "audio/webm",
+      "audio/mp4",
+      "audio/ogg;codecs=opus",
+    ];
+    for (const c of candidates) {
+      if (typeof MediaRecorder.isTypeSupported === "function" && MediaRecorder.isTypeSupported(c))
+        return c;
+    }
+    return undefined;
+  };
+
+  const stopMediaTracks = () => {
+    mediaStream?.getTracks().forEach((t) => t.stop());
+    mediaStream = null;
+    mediaRecorder = null;
   };
 
   const startCapture = async () => {
     armingTimer = null;
     setPhase("starting");
+    if (browserMicAvailable()) {
+      try {
+        await api("/api/voice/start", {
+          method: "POST",
+          body: JSON.stringify({ capture: "client" }),
+        });
+        mediaStream = await navigator.mediaDevices.getUserMedia({
+          audio: { echoCancellation: true, noiseSuppression: true },
+        });
+        const mimeType = pickMimeType();
+        mediaRecorder = new MediaRecorder(mediaStream, mimeType ? { mimeType } : undefined);
+        recChunks = [];
+        mediaRecorder.ondataavailable = (e) => {
+          if (e.data.size) recChunks.push(e.data);
+        };
+        mediaRecorder.start(250);
+        clientMode = true;
+        holding = true;
+        setPhase("recording");
+        return;
+      } catch {
+        // Permission denied / no device — drop the partial client take and
+        // fall back to the host capture below (the server's own mic).
+        stopMediaTracks();
+        setError(
+          "Browser mic unavailable — using the server's microphone (open via https for this device's mic)",
+        );
+        setTimeout(() => setError(""), 6000);
+      }
+    }
     try {
       await api("/api/voice/start", { method: "POST", body: "{}" });
+      clientMode = false;
       holding = true;
       setPhase("recording");
     } catch (e: any) {
@@ -121,14 +190,43 @@ export function PushToTalk() {
     if (!holding) return;
     holding = false;
     try {
-      const res = await api<{ jobId: string }>(
-        "/api/voice/stop",
-        {
+      if (clientMode) {
+        // Flush the recorder, then upload the take from THIS device's mic.
+        const blob = await new Promise<Blob>((resolve) => {
+          const rec = mediaRecorder;
+          if (!rec) return resolve(new Blob());
+          rec.onstop = () => resolve(new Blob(recChunks, { type: rec.mimeType || "audio/webm" }));
+          try {
+            rec.stop();
+          } catch {
+            resolve(new Blob());
+          }
+        });
+        stopMediaTracks();
+        clientMode = false;
+        const session = selected() ?? null;
+        const qs = session ? `?session=${encodeURIComponent(session)}` : "";
+        const res = await fetch(appPath(`/api/voice/stop${qs}`), {
           method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ session: selected() ?? null }),
-        },
-      );
+          headers: { "content-type": blob.type || "audio/webm" },
+          body: blob,
+        });
+        const data = (await res.json().catch(() => ({}))) as {
+          jobId?: string;
+          error?: string;
+        };
+        if (!res.ok || !data.jobId) throw new Error(data.error || String(res.status));
+        working = true;
+        setPhase("working");
+        setStepLabel("Saving audio…");
+        pollJob(data.jobId, Date.now());
+        return;
+      }
+      const res = await api<{ jobId: string }>("/api/voice/stop", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ session: selected() ?? null }),
+      });
       working = true;
       setPhase("working");
       setStepLabel("Saving audio…");

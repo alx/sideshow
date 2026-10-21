@@ -8,7 +8,7 @@
 
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createWriteStream, type WriteStream } from "node:fs";
-import { mkdir, readFile, stat, unlink } from "node:fs/promises";
+import { mkdir, readFile, stat, unlink, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -23,7 +23,11 @@ export const voiceDir = (): string => {
   return dir;
 };
 
-type ToolName = "sox" | "ffmpeg" | "arecord";
+type ToolName = "sox" | "ffmpeg" | "arecord" | "browser";
+
+function genId(): string {
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
 
 interface CaptureTool {
   name: ToolName;
@@ -126,8 +130,9 @@ export interface Recording {
   startedAt: string;
 }
 
-interface Active {
+interface ActiveServer {
   id: string;
+  mode: "server";
   tool: CaptureTool;
   proc: ChildProcess;
   stream: WriteStream;
@@ -136,21 +141,44 @@ interface Active {
   timer: NodeJS.Timeout;
 }
 
+interface ActiveClient {
+  id: string;
+  mode: "client";
+  startedAt: number;
+  timer: NodeJS.Timeout;
+}
+
+type Active = ActiveServer | ActiveClient;
+
 let active: Active | null = null;
 
 function tmpPcmPath(id: string): string {
   return join("/tmp", `sideshow-voice-${id}.pcm`);
 }
 
-export async function startVoiceRecording(): Promise<
-  Recording | { error: string; status: 409 | 500 }
-> {
+export async function startVoiceRecording(opts?: {
+  capture?: "client";
+}): Promise<Recording | { error: string; status: 409 | 500 }> {
   if (active) return { error: "a recording is already in progress", status: 409 };
+  const id = genId();
+  // Client capture: the browser records its own microphone (getUserMedia +
+  // MediaRecorder) and uploads the take to /stop. Needed when the viewer is
+  // on another machine than the server — the host mic is the wrong device.
+  if (opts?.capture === "client") {
+    const startedAt = Date.now();
+    const timer = setTimeout(() => {
+      if (active && active.id === id) {
+        console.log(`[sideshow voice] max duration reached, dropping client take ${id}`);
+        active = null;
+      }
+    }, MAX_RECORDING_MS);
+    active = { id, mode: "client", startedAt, timer };
+    return { id, tool: "browser", startedAt: new Date(startedAt).toISOString() };
+  }
   const tool = detectCaptureTool();
   if (!tool) {
     return { error: "no audio capture tool found — install sox or ffmpeg", status: 500 };
   }
-  const id = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
   const tmpPath = tmpPcmPath(id);
   const stream = createWriteStream(tmpPath);
   const proc = spawn(tool.cmd, tool.args, { stdio: ["ignore", "pipe", "pipe"] });
@@ -165,13 +193,14 @@ export async function startVoiceRecording(): Promise<
   });
   const startedAt = Date.now();
   const timer = setTimeout(() => {
-    if (active && active.id === id) {
+    if (active && active.id === id && active.mode === "server") {
       console.log(`[sideshow voice] max duration reached, killing capture ${id}`);
       killCapture(active.proc);
     }
   }, MAX_RECORDING_MS);
   active = {
     id,
+    mode: "server",
     tool,
     proc,
     stream,
@@ -213,13 +242,33 @@ export interface RecordingResult {
   pcm: Buffer;
 }
 
-export async function stopVoiceRecording(): Promise<
-  RecordingResult | { error: string; status: 409 | 400 | 500 }
-> {
+export interface UploadTake {
+  bytes: Buffer;
+  contentType?: string;
+}
+
+export async function stopVoiceRecording(
+  upload?: UploadTake,
+): Promise<RecordingResult | { error: string; status: 409 | 400 | 500 }> {
   const cur = active;
+  if (upload?.bytes) {
+    // Browser-captured take: the client uploads the MediaRecorder container
+    // (webm/m4a/…). Adopt the in-flight recording's id when there is one so
+    // the job the viewer is polling stays valid.
+    const id = cur?.id ?? genId();
+    if (cur) {
+      active = null;
+      clearTimeout(cur.timer);
+      if (cur.mode === "server") killCapture(cur.proc);
+    }
+    return finishUploadedTake(id, upload.bytes, upload.contentType);
+  }
   if (!cur) return { error: "no recording in progress", status: 409 };
   active = null;
   clearTimeout(cur.timer);
+  if (cur.mode === "client") {
+    return { error: "client capture requires an uploaded take", status: 400 };
+  }
   killCapture(cur.proc);
 
   // Wait for the child to actually exit so its stdout flush finishes.
@@ -329,10 +378,99 @@ export async function stopVoiceRecording(): Promise<
     file: `${cur.id}.mp3`,
     url: `/voice/${cur.id}.mp3`,
     tool: cur.tool.name,
-    ms: Math.round(pcmBytes / (2 * CHANNELS) / SAMPLE_RATE * 1000),
+    ms: Math.round((pcmBytes / (2 * CHANNELS) / SAMPLE_RATE) * 1000),
     bytes: mp3Bytes,
     pcm: pcm ?? Buffer.alloc(0),
   };
+}
+
+const CLIENT_CONTAINER_EXT: Record<string, string> = {
+  "video/webm": "webm",
+  "audio/webm": "webm",
+  "audio/mp4": "m4a",
+  "video/mp4": "m4a",
+  "audio/ogg": "ogg",
+  "video/ogg": "ogg",
+  "audio/mpeg": "mp3",
+  "audio/wav": "wav",
+};
+
+function ffmpegToPcm(input: string): Promise<{ ok: boolean; pcm?: Buffer; err?: string }> {
+  return new Promise((resolve) => {
+    const p = spawn(
+      "ffmpeg",
+      [
+        "-y",
+        "-loglevel",
+        "error",
+        "-i",
+        input,
+        "-f",
+        "s16le",
+        "-ar",
+        String(SAMPLE_RATE),
+        "-ac",
+        String(CHANNELS),
+        "pipe:1",
+      ],
+      { stdio: ["ignore", "pipe", "pipe"] },
+    );
+    const chunks: Buffer[] = [];
+    let err = "";
+    p.stdout?.on("data", (d: Buffer) => chunks.push(d));
+    p.stderr?.on("data", (d: Buffer) => (err = (err + d.toString()).slice(-400)));
+    p.once("error", (e: Error) => resolve({ ok: false, err: e.message }));
+    p.once("close", (code) =>
+      code === 0 ? resolve({ ok: true, pcm: Buffer.concat(chunks) }) : resolve({ ok: false, err }),
+    );
+  });
+}
+
+async function finishUploadedTake(
+  id: string,
+  bytes: Buffer,
+  contentType?: string,
+): Promise<RecordingResult | { error: string; status: 400 | 500 }> {
+  if (bytes.length < 64) {
+    return { error: "empty upload — nothing recorded", status: 400 as const };
+  }
+  const ext = CLIENT_CONTAINER_EXT[contentType?.toLowerCase() ?? ""] ?? "webm";
+  const dir = voiceDir();
+  await mkdir(dir, { recursive: true });
+  const upPath = join(dir, `${id}.upload-${ext}`);
+  const outFile = join(dir, `${id}.mp3`);
+  try {
+    await writeFile(upPath, bytes);
+    const pcmPromise = ffmpegToPcm(upPath);
+    const conv = spawn(
+      "ffmpeg",
+      ["-y", "-loglevel", "error", "-i", upPath, "-codec:a", "libmp3lame", "-b:a", "128k", outFile],
+      { stdio: ["ignore", "ignore", "pipe"] },
+    );
+    const convOk = await new Promise<boolean>((resolve) => {
+      conv.once("error", () => resolve(false));
+      conv.once("close", (code) => resolve(code === 0));
+    });
+    const { ok, pcm, err } = await pcmPromise;
+    if (!convOk || !ok || !pcm || pcm.length < 320) {
+      await unlink(outFile).catch(() => {});
+      return {
+        error: `could not decode uploaded take${err ? ` (${err.slice(-200)})` : " — empty"}`,
+        status: 500 as const,
+      };
+    }
+    return {
+      id,
+      file: `${id}.mp3`,
+      url: `/voice/${id}.mp3`,
+      tool: "browser",
+      ms: Math.round((pcm.length / (2 * CHANNELS) / SAMPLE_RATE) * 1000),
+      bytes: (await stat(outFile)).size,
+      pcm,
+    };
+  } finally {
+    await unlink(upPath).catch(() => {});
+  }
 }
 
 export function resolveVoiceFile(name: string): string | null {

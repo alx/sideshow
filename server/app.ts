@@ -1262,8 +1262,11 @@ export function createApp({
   // Cloudflare Worker build never touches these routes.
 
   app.post("/api/voice/start", async (c) => {
+    const body = (await c.req.json().catch(() => ({}))) as { capture?: unknown };
     const voice = await import("./voice.ts");
-    const rec = await voice.startVoiceRecording();
+    const rec = await voice.startVoiceRecording(
+      body.capture === "client" ? { capture: "client" } : undefined,
+    );
     if ("error" in rec) return c.json(rec, rec.status);
     return c.json(rec, 201);
   });
@@ -1373,10 +1376,7 @@ export function createApp({
       // 3 — upgrade the card to transcript text + player.
       step("Updating note with transcript…");
       const revised = await revisePost(published.post.id, {
-        surfaces: [
-          { kind: "markdown", markdown: transcript },
-          htmlSurface(audioHtml(url)),
-        ],
+        surfaces: [{ kind: "markdown", markdown: transcript }, htmlSurface(audioHtml(url))],
       });
       if ("error" in revised) throw new Error(`note update failed: ${revised.error}`);
 
@@ -1412,9 +1412,21 @@ export function createApp({
   }
 
   app.post("/api/voice/stop", async (c) => {
-    const body = (await c.req.json().catch(() => ({}))) as { session?: unknown };
+    // Browser-captured takes arrive as a raw MediaRecorder media body
+    // (webm/m4a/…); legacy server captures and plain stops send JSON.
+    const ct = (c.req.header("content-type") ?? "").toLowerCase();
+    let session: string | undefined;
+    let upload: { bytes: Buffer; contentType: string } | undefined;
+    if (ct.startsWith("audio/") || ct.startsWith("video/")) {
+      upload = { bytes: Buffer.from(await c.req.arrayBuffer()), contentType: ct };
+    } else {
+      const body = (await c.req.json().catch(() => ({}))) as { session?: unknown };
+      if (typeof body.session === "string") session = body.session;
+    }
+    const qsSession = c.req.query("session");
+    if (typeof qsSession === "string" && !session) session = qsSession;
     const voice = await import("./voice.ts");
-    const result = await voice.stopVoiceRecording();
+    const result = await voice.stopVoiceRecording(upload);
     if ("error" in result) return c.json(result, result.status);
     const { pcm, ...rec } = result;
     const jobId = `vjob-${result.id}`;
@@ -1426,12 +1438,7 @@ export function createApp({
       file: rec.file,
       url: result.url,
     });
-    void runVoiceJob(
-      jobId,
-      { url: result.url, file: rec.file, pcm },
-      typeof body.session === "string" ? body.session : undefined,
-      c.req.raw,
-    );
+    void runVoiceJob(jobId, { url: result.url, file: rec.file, pcm }, session, c.req.raw);
     return c.json({ ...rec, jobId }, 202);
   });
 
@@ -1444,9 +1451,7 @@ export function createApp({
   // Inbox: the bridge the pi-sideshow-voice extension polls. Delivering is
   // the claim — the first POST wins, later ones get 409, so exactly one Pi
   // session receives a given transcript.
-  app.get("/api/voice/inbox", (c) =>
-    c.json(voiceInbox.filter((i) => i.status === "pending")),
-  );
+  app.get("/api/voice/inbox", (c) => c.json(voiceInbox.filter((i) => i.status === "pending")));
   app.post("/api/voice/inbox/:id/deliver", async (c) => {
     const item = voiceInbox.find((i) => i.id === c.req.param("id"));
     if (!item) return c.json({ error: "not found" }, 404);
@@ -1508,7 +1513,10 @@ export function createApp({
     // Hono does not expose the wildcard value as a named param — take it off
     // the request path instead (basename only; the voice dir is flat).
     const name = decodeURIComponent(
-      c.req.path.replace(/^\/voice\//, "").split("/").pop() ?? "",
+      c.req.path
+        .replace(/^\/voice\//, "")
+        .split("/")
+        .pop() ?? "",
     );
     const file = voice.resolveVoiceFile(name);
     if (!file) return c.json({ error: "not found" }, 404);
