@@ -759,7 +759,7 @@ function pasteBlock(c: ViewComment): string {
   return `sideshow comment, session “${s ? sessionLabel(s) : c.sessionId}”:\n“${c.text}”`;
 }
 
-function CommentRow(props: { comment: ViewComment }) {
+export function CommentRow(props: { comment: ViewComment }) {
   const copy = async () => {
     try {
       await navigator.clipboard.writeText(pasteBlock(props.comment));
@@ -779,6 +779,26 @@ function CommentRow(props: { comment: ViewComment }) {
       <Show when={anchorLabel(props.comment.anchor)} keyed>
         {(label) => <span class="anchor-chip">{label}</span>}
       </Show>
+      <Show when={props.comment.pi} keyed>
+        {(pi) => (
+          <span
+            class={`pi-chip pi-${pi().status}`}
+            title={
+              pi().status === "pending"
+                ? "Queued for your Pi session"
+                : pi().status === "delivered"
+                  ? "Your Pi session has it — it will answer in this thread"
+                  : "Answered in this thread"
+            }
+          >
+            {pi().status === "pending"
+              ? "queued"
+              : pi().status === "delivered"
+                ? "sent"
+                : "answered"}
+          </span>
+        )}
+      </Show>
       {/* Plain comment text rendered as a Solid text node — escapes by
           construction (the invariant's option-(b) for data), so no iframe is
           needed. `white-space: pre-wrap` (in styles.css) keeps the author's
@@ -794,7 +814,7 @@ function CommentRow(props: { comment: ViewComment }) {
   );
 }
 
-function Composer(props: {
+export function Composer(props: {
   placeholder: string;
   send: (text: string) => Promise<string | null>;
   autofocus?: boolean;

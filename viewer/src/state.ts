@@ -508,6 +508,9 @@ export async function sendComment(
     author: "user",
     text,
     createdAt: new Date().toISOString(),
+    // Viewer comments always enter the Pi inbox as pending — mirror the
+    // server's stamp so the queued chip shows before the SSE refetch lands.
+    pi: { status: "pending" },
     ...(anchor && { anchor }),
     pending: true,
   };
@@ -629,6 +632,17 @@ async function handleFeedData(data: string) {
     if (away && e.sessionId) markUnread(e.sessionId);
     if (e.sessionId === selected()) {
       const query = e.surfaceId ? `surface=${e.surfaceId}` : `session=${e.sessionId}`;
+      const res = await api<{ comments: Comment[] }>(`/api/comments?${query}`);
+      mergeComments(res.comments);
+    }
+  } else if (e.type === "comment-updated") {
+    // Pi-inbox state moved (claim / answer) — refresh the thread so the
+    // queued/sent/answered chips track the lifecycle without a reload.
+    // e.id is the post id, or the session id for session-level chat.
+    if (e.sessionId === selected()) {
+      const query = e.surfaceId
+        ? `surface=${encodeURIComponent(e.surfaceId)}`
+        : `session=${encodeURIComponent(e.sessionId)}`;
       const res = await api<{ comments: Comment[] }>(`/api/comments?${query}`);
       mergeComments(res.comments);
     }

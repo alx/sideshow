@@ -790,7 +790,7 @@ export function runStoreContract(name: string, makeStore: () => Store | Promise<
     assert.deepEqual(await store.listPiInbox(s.id), []);
   });
 
-  contract("answer flips a post's open items to answered", async (store) => {
+  contract("answer flips a post's open items (and session chat) to answered", async (store) => {
     const s = await store.createSession({ agent: "pi" });
     const postA = await store.createPost({
       sessionId: s.id,
@@ -821,9 +821,16 @@ export function runStoreContract(name: string, makeStore: () => Store | Promise<
       text: "pending on B",
       startInbox: true,
     });
+    const generalChat = await store.createComment({
+      sessionId: s.id,
+      author: "user",
+      text: "general chat",
+      startInbox: true,
+    });
     await store.claimPiInbox(deliveredOnA?.id ?? "", "pi-A");
 
-    await store.answerPiInboxPost(postA?.id ?? "");
+    // A post-level reply answers that post's items plus the session's chat.
+    await store.answerPiInboxReply(s.id, postA?.id ?? null);
 
     const byId = Object.fromEntries(
       (await store.listComments({ sessionId: s.id })).map((c) => [c.id, c]),
@@ -831,14 +838,45 @@ export function runStoreContract(name: string, makeStore: () => Store | Promise<
     assert.equal(byId[pendingOnA!.id]?.pi?.status, "answered");
     assert.equal(byId[deliveredOnA!.id]?.pi?.status, "answered");
     assert.ok(byId[deliveredOnA!.id]?.pi?.answeredAt);
+    assert.equal(byId[generalChat!.id]?.pi?.status, "answered");
     // other post untouched
     assert.equal(byId[pendingOnB!.id]?.pi?.status, "pending");
-    // answering an already-answered post is a no-op (no throw)
-    await store.answerPiInboxPost(postA?.id ?? "");
+    // answering again is a no-op (no throw)
+    await store.answerPiInboxReply(s.id, postA?.id ?? null);
     assert.deepEqual(
       (await store.listPiInbox(s.id)).map((c) => c.text),
       ["pending on B"],
     );
+  });
+
+  contract("session-level reply answers only session-level items", async (store) => {
+    const s = await store.createSession({ agent: "pi" });
+    const postA = await store.createPost({
+      sessionId: s.id,
+      surfaces: [htmlSurface("<p>a</p>")],
+    });
+    const onPost = await store.createComment({
+      sessionId: s.id,
+      postId: postA?.id,
+      author: "user",
+      text: "on post",
+      startInbox: true,
+    });
+    const chat = await store.createComment({
+      sessionId: s.id,
+      author: "user",
+      text: "chat",
+      startInbox: true,
+    });
+
+    // A session-level reply must NOT sweep the post's items.
+    await store.answerPiInboxReply(s.id, null);
+
+    const byId = Object.fromEntries(
+      (await store.listComments({ sessionId: s.id })).map((c) => [c.id, c]),
+    );
+    assert.equal(byId[chat!.id]?.pi?.status, "answered");
+    assert.equal(byId[onPost!.id]?.pi?.status, "pending");
   });
 
   // --- trace ---

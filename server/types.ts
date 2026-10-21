@@ -414,8 +414,12 @@ export interface Store {
   // Atomically claim a pending inbox comment (pending -> delivered).
   // Returns null when the id is unknown or no longer pending (the caller 409s).
   claimPiInbox(id: string, client?: string): Promise<Comment | null>;
-  // An agent reply landed on this post: mark its open inbox comments answered.
-  answerPiInboxPost(postId: string): Promise<void>;
+  // An agent reply landed in a session: answer its open inbox comments.
+  // A post-level reply (postId set) answers that post's items PLUS the
+  // session-level (postId=null) general-chat items, so an ambient message is
+  // closed as soon as the agent engages the session visibly. A session-level
+  // reply (postId null) answers only session-level items.
+  answerPiInboxReply(sessionId: string, postId: string | null): Promise<void>;
 
   // Session-scoped agent trace: the steps that produced a session's surfaces,
   // synced from the transcript. setTrace replaces the whole list (windowed

@@ -640,13 +640,18 @@ export class SqlStore implements Store {
     return this.rowToComment(full);
   }
 
-  async answerPiInboxPost(postId: string) {
+  async answerPiInboxReply(sessionId: string, postId: string | null) {
     const now = new Date().toISOString();
+    // postId null in the WHERE clause makes "postId = ?" match nothing, so a
+    // session-level reply touches only session-level items; a post reply
+    // additionally sweeps the session's general-chat items.
     this.sql.exec(
       `UPDATE comments SET piStatus = 'answered',
                piMeta = json_set(COALESCE(piMeta, '{}'), '$.answeredAt', ?)
-       WHERE postId = ? AND piStatus IN ('pending', 'delivered')`,
+       WHERE sessionId = ? AND piStatus IN ('pending', 'delivered')
+         AND (postId = ? OR postId IS NULL)`,
       now,
+      sessionId,
       postId,
     );
   }

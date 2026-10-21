@@ -280,8 +280,11 @@ test(
     ]);
     assert.deepEqual(harness.tool("sideshow_update_surface").parameters.required, ["id"]);
     const replySchema = harness.tool("sideshow_reply_to_user").parameters;
-    assert.deepEqual(replySchema.required, ["surfaceId", "message"]);
-    assert.equal("session" in replySchema.properties!, false);
+    // surfaceId and sessionId are alternatives — neither is individually
+    // required, the handler rejects a reply with neither target.
+    assert.deepEqual(replySchema.required, ["message"]);
+    assert.equal("surfaceId" in (replySchema.properties as Record<string, unknown>), true);
+    assert.equal("sessionId" in (replySchema.properties as Record<string, unknown>), true);
     const advertisedKinds = harness.tool("sideshow_publish_surface").parameters.properties?.parts
       .items.properties.kind.enum;
     for (const kind of [

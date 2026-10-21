@@ -1,7 +1,8 @@
 import { createMemo, createSignal, For, Show } from "solid-js";
 import type { TraceStep, ViewerPost } from "./api.ts";
-import { Card } from "./Card.tsx";
-import { streamLoading, posts, traceSteps } from "./state.ts";
+import { isReadonly } from "./api.ts";
+import { Card, CommentRow, Composer } from "./Card.tsx";
+import { comments, streamLoading, posts, selected, sendComment, traceSteps } from "./state.ts";
 
 // Treatment E, refined (A → C). A left rail where only anchors get a node —
 // user prompts and published posts. Each turn shows just its intent (first
@@ -62,11 +63,36 @@ function groupTurns(steps: readonly TraceStep[]): Turn[] {
   return turns;
 }
 
+// Session-home chat: general messages to/from the bound Pi session that are
+// not anchored to a card (postId=null). Viewer comments here enter the Pi
+// inbox like card-thread comments and carry the same queued/sent/answered
+// chip; the agent's session-level replies land in this same strip.
+function SessionChat() {
+  const sessionId = selected();
+  const list = () => comments().filter((c) => c.sessionId === sessionId && c.postId === null);
+  return (
+    <div class="thread session-chat">
+      <Show when={list().length > 0}>
+        <div class="cmts">
+          <For each={list()}>{(c) => <CommentRow comment={c} />}</For>
+        </div>
+      </Show>
+      <Show when={!isReadonly()}>
+        <Composer
+          placeholder="Message this session's Pi…"
+          send={(text) => sendComment({ session: sessionId, text, author: "user" }, null, text)}
+        />
+      </Show>
+    </div>
+  );
+}
+
 export function SessionTimeline() {
   const gaps = createMemo(() => buildGaps(posts, traceSteps()));
   const empty = () => !streamLoading() && posts.length === 0 && traceSteps().length === 0;
   return (
     <div class="timeline">
+      <SessionChat />
       <Show when={empty()}>
         <div class="empty">No posts in this session yet.</div>
       </Show>

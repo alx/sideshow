@@ -12,9 +12,22 @@ const PI_INBOX_RETRIES = 3;
 
 const PI_INBOX_ENABLED = () => process.env.SIDESHOW_PI_INBOX !== "0";
 
-// A comment from the viewer thread, framed so the agent revises the card and
-// always closes the loop with an in-thread reply (which flips it answered).
+// A comment from the viewer, framed so the agent revises the card (or acts
+// on a general session message) and always closes the loop with a visible
+// reply — that reply is what flips the message answered server-side.
 function piInboxMessage(comment) {
+  if (!comment.postId) {
+    return [
+      `[Sideshow viewer] General message from the session home of session ${comment.sessionId}:`,
+      "```",
+      comment.text,
+      "```",
+      "",
+      "Close this viewer message:",
+      "1. Act on the message. If the user needs to see an answer in the viewer, publish a card (sideshow_publish_surface) or revise the most relevant existing one (sideshow_list_surfaces + sideshow_update_surface).",
+      `2. ALWAYS finish by calling sideshow_reply_to_user(sessionId "${comment.sessionId}", message "<one or two sentences: what you did, or why not>"). That session-level reply shows in the session-home chat and marks the message answered.`,
+    ].join("\n");
+  }
   const title = comment.postTitle || "(untitled)";
   const surface = comment.postId;
   return [
@@ -660,13 +673,36 @@ export default function sideshowExtension(pi) {
     parameters: {
       type: "object",
       properties: {
-        surfaceId: { type: "string", description: "Surface thread to reply under" },
+        surfaceId: {
+          type: "string",
+          description:
+            "Surface thread to reply under (omit for a session-level reply, with sessionId)",
+        },
+        sessionId: {
+          type: "string",
+          description: "Session to reply in when there is no surface thread (session-home chat)",
+        },
         message: { type: "string", description: "Plain-text reply" },
       },
-      required: ["surfaceId", "message"],
+      required: ["message"],
     },
     async execute(_toolCallId, params) {
-      const body = { text: params.message, surface: params.surfaceId };
+      const body = {
+        text: params.message,
+        ...(params.surfaceId
+          ? { surface: params.surfaceId }
+          : { session: params.sessionId ?? state.sessionId }),
+      };
+      if (!body.surface && !body.session) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: "Reply failed: provide surfaceId (or sessionId / a remembered session).",
+            },
+          ],
+        };
+      }
       const comment = await requestJson("/api/comments", {
         method: "POST",
         body: JSON.stringify(body),
@@ -677,7 +713,7 @@ export default function sideshowExtension(pi) {
         content: [
           {
             type: "text",
-            text: `Posted sideshow reply${surfaceId ? ` on surface ${surfaceId}` : ""}.${feedbackSummary(comment.userFeedback)}`,
+            text: `Posted sideshow reply${surfaceId ? ` on surface ${surfaceId}` : ` in session ${comment.sessionId}`}.${feedbackSummary(comment.userFeedback)}`,
           },
         ],
         details: { ...comment, baseUrl: baseUrl() },

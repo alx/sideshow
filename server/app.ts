@@ -719,6 +719,9 @@ export function createApp({
   async function createComment(input: {
     text: string;
     surface?: string;
+    // Session-level comment (no card): the viewer's session-home chat and Pi's
+    // in-session replies. Exactly one of surface/sessionId is expected.
+    sessionId?: string;
     // Viewer-originated comments may set "user" or "surface". All agent
     // channels omit this and derive their author from the owning session.
     author?: "user" | "surface";
@@ -726,20 +729,20 @@ export function createApp({
   }): Promise<
     { comment: Comment; userFeedback?: Feedback[] } | { error: string; status: 400 | 404 }
   > {
-    // Comments always attach to a post — a comment with nothing to point at
-    // is just a message to the agent, which is what the agent's own prompt is for.
-    if (!input.surface) return { error: 'provide a "surface" id', status: 400 };
-    const post = await store.getPost(input.surface);
-    if (!post) return { error: "post not found", status: 404 };
-    const session = await store.getSession(post.sessionId);
+    const post = input.surface ? await store.getPost(input.surface) : null;
+    if (input.surface && !post) return { error: "post not found", status: 404 };
+    if (!post && !input.sessionId)
+      return { error: 'provide a "surface" id or a "session"', status: 400 };
+    const sessionId = post ? post.sessionId : (input.sessionId as string);
+    const session = await store.getSession(sessionId);
     if (!session) return { error: "session not found", status: 404 };
     const author = input.author ?? reservedAgent(session.agent);
     const comment = await store.createComment({
-      sessionId: post.sessionId,
-      postId: post.id,
+      sessionId,
+      postId: post?.id,
       author,
       text: input.text.trim().slice(0, MAX_COMMENT_TEXT),
-      anchor: sanitizeCommentAnchor(input.anchor, post),
+      anchor: post ? sanitizeCommentAnchor(input.anchor, post) : undefined,
       // Viewer comments enter the Pi inbox; agent/surface writes never do.
       startInbox: author === "user",
     });
@@ -751,11 +754,18 @@ export function createApp({
       surfaceId: comment.postId,
       seq: comment.seq,
     });
-    // An agent reply in a thread answers the Pi-inbox items of that post.
-    // (Surface-published comments are not agent replies and do not answer.)
+    // An agent reply answers the Pi-inbox items of its post — plus the
+    // session-level chat, so a card-thread reply also closes a general
+    // message from the session home. (Surface-published comments are not
+    // agent replies and do not answer.)
     if (author !== "user" && author !== "surface") {
-      await store.answerPiInboxPost(post.id);
-      bus.broadcast({ type: "comment-updated", id: post.id, sessionId: post.sessionId });
+      await store.answerPiInboxReply(sessionId, post?.id ?? null);
+      bus.broadcast({
+        type: "comment-updated",
+        id: post?.id ?? sessionId,
+        sessionId,
+        surfaceId: post?.id ?? null,
+      });
     }
     // agent replies are writes too — piggyback pending feedback on them, but
     // never on the user's own comments
@@ -1778,6 +1788,7 @@ export function createApp({
       return c.json({ error: 'body must include non-empty "text" string' }, 400);
     }
     const surface = typeof body.surface === "string" ? body.surface : body.snippet;
+    const session = typeof body.session === "string" ? body.session : undefined;
     // The browser sets Fetch Metadata on same-origin requests. Only the trusted
     // viewer may declare the two non-agent labels; CLI, MCP, and raw HTTP calls
     // instead derive their author from the session and cannot mint "user".
@@ -1791,6 +1802,7 @@ export function createApp({
     const result = await createComment({
       text: body.text,
       surface: typeof surface === "string" ? surface : undefined,
+      sessionId: session,
       author,
       anchor: body.anchor,
     });
@@ -1826,8 +1838,9 @@ export function createApp({
     if (!comment) return c.json({ error: "comment not pending" }, 409);
     bus.broadcast({
       type: "comment-updated",
-      id: comment.postId ?? comment.id,
+      id: comment.postId ?? comment.sessionId,
       sessionId: comment.sessionId,
+      surfaceId: comment.postId,
     });
     return c.json(comment);
   });

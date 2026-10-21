@@ -499,12 +499,17 @@ export class JsonFileStore implements Store {
     return clone(comment);
   }
 
-  async answerPiInboxPost(postId: string) {
+  async answerPiInboxReply(sessionId: string, postId: string | null) {
     await this.load();
     const now = new Date().toISOString();
     let changed = false;
     for (const c of this.comments) {
-      if (c.postId === postId && c.pi && c.pi.status !== "answered") {
+      if (c.sessionId !== sessionId || !c.pi || c.pi.status === "answered") continue;
+      // Post reply: that post's items plus the session's general chat.
+      // Session reply (postId null): general chat only.
+      const inScope =
+        postId !== null ? c.postId === postId || c.postId === null : c.postId === null;
+      if (inScope) {
         c.pi = { ...c.pi, status: "answered", answeredAt: now };
         changed = true;
       }

@@ -1015,13 +1015,17 @@ test("comments can be deleted", async () => {
   );
 });
 
-test("a comment must target a surface", async () => {
+test("a comment needs a surface or a session", async () => {
   const app = makeApp();
   const s = (await (await app.request("/api/snippets", json({ html: "<p>x</p>" }))).json()) as any;
 
-  // no surface/snippet id — there is no session-level thread to land in
-  const res = await app.request("/api/comments", json({ session: s.sessionId, text: "general" }));
+  // no surface/snippet and no session id — nowhere to land
+  const res = await app.request("/api/comments", json({ text: "nowhere" }));
   assert.equal(res.status, 400);
+
+  // a session-level comment (session, no surface) is a valid general-chat message
+  const chat = await app.request("/api/comments", json({ session: s.sessionId, text: "general" }));
+  assert.equal(chat.status, 201);
 
   // a surface that doesn't exist is a 404, not a silent session-level comment
   const ghost = await app.request("/api/comments", json({ snippet: "missing", text: "ghost" }));
