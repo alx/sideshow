@@ -5,6 +5,42 @@ const DEFAULT_BASE_URL = "http://localhost:8228";
 const MAX_WAIT_SECONDS = 300;
 const TRACE_MAX_DETAIL = 1800;
 const TRACE_MAX_LABEL = 140;
+// Pi inbox: poll this often; a claimed item is handed to the agent as a user
+// message and retried a few times before being surfaced as a warning.
+const PI_INBOX_POLL_MS = Math.max(250, Number(process.env.SIDESHOW_PI_INBOX_POLL_MS) || 3000);
+const PI_INBOX_RETRIES = 3;
+
+const PI_INBOX_ENABLED = () => process.env.SIDESHOW_PI_INBOX !== "0";
+
+// A comment from the viewer thread, framed so the agent revises the card and
+// always closes the loop with an in-thread reply (which flips it answered).
+function piInboxMessage(comment) {
+  const title = comment.postTitle || "(untitled)";
+  const surface = comment.postId;
+  return [
+    `[Sideshow viewer] New message in the thread for card "${title}" (surface ${surface}):`,
+    "```",
+    comment.text,
+    "```",
+    "",
+    "Close this viewer message:",
+    `1. If it asks to change this card, revise it in place with sideshow_update_surface (id ${surface}) — fetch the current parts first (sideshow_list_surfaces or GET /api/posts/${surface}) and change only what was asked.`,
+    `2. ALWAYS finish by calling sideshow_reply_to_user(surfaceId "${surface}", message "<one or two sentences: what you changed, or why not>"). That reply marks the message answered for the user.`,
+  ].join("\n");
+}
+
+// Claim one inbox item. Returns the claimed comment, or null on 409 (another
+// Pi won the claim) — mirroring the voice-inbox deliver semantics.
+async function claimPiInboxItem(id, client) {
+  const response = await fetch(`${baseUrl()}/api/pi/inbox/${encodeURIComponent(id)}/deliver`, {
+    method: "POST",
+    headers: authHeaders({ "content-type": "application/json" }),
+    body: JSON.stringify({ client }),
+  });
+  if (response.status === 409) return null;
+  if (!response.ok) throw new Error(`claim ${id} failed: ${response.status}`);
+  return response.json();
+}
 
 const CONTENT_TYPES = {
   png: "image/png",
@@ -376,6 +412,55 @@ export default function sideshowExtension(pi) {
         : `sideshow ${baseUrl().replace(/^https?:\/\//, "")}`,
     );
   });
+
+  // Poll this session's viewer inbox: claim each pending comment (first Pi
+  // wins, 409 otherwise) and hand it to the agent as a user message carrying
+  // the card-revision + reply contract. SIDESHOW_PI_INBOX=0 disables it.
+  if (PI_INBOX_ENABLED()) {
+    let inboxBusy = false;
+    const pollPiInbox = async () => {
+      if (inboxBusy || !state.sessionId) return;
+      const sessionId = state.sessionId;
+      let items = [];
+      try {
+        const res = await fetch(
+          `${baseUrl()}/api/pi/inbox?session=${encodeURIComponent(sessionId)}`,
+          { headers: authHeaders() },
+        );
+        if (res.ok) items = (await res.json()) ?? [];
+      } catch {
+        return; // sideshow server not reachable — nothing to do
+      }
+      for (const item of items) {
+        inboxBusy = true;
+        try {
+          const claimed = await claimPiInboxItem(item.id, `pi:${process.pid}`);
+          if (!claimed) continue; // another Pi session claimed it
+          let sent = false;
+          for (let attempt = 0; attempt < PI_INBOX_RETRIES && !sent; attempt++) {
+            try {
+              await pi.sendUserMessage(piInboxMessage(claimed), { deliverAs: "followUp" });
+              sent = true;
+            } catch {
+              if (attempt < PI_INBOX_RETRIES - 1)
+                await new Promise((r) => setTimeout(r, 500 * (attempt + 1)));
+            }
+          }
+          if (!sent) console.warn("[sideshow] pi-inbox: message not delivered after retries");
+        } catch {
+          // transient failure — retry on the next poll
+        } finally {
+          inboxBusy = false;
+        }
+      }
+    };
+    const timer = setInterval(() => {
+      void pollPiInbox();
+    }, PI_INBOX_POLL_MS);
+    timer.unref?.();
+    pi.on("session_shutdown", () => clearInterval(timer));
+    void pollPiInbox();
+  }
 
   pi.on("turn_end", async (_event, ctx) => {
     if (!state.sessionId) return;

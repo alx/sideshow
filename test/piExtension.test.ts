@@ -42,7 +42,8 @@ function createPiHarness() {
   const tools = new Map<string, ToolDefinition>();
   const commands = new Map<string, CommandDefinition>();
   const handlers = new Map<string, EventHandler[]>();
-  const pi = {
+  const sentUserMessages: string[] = [];
+  const pi: Record<string, any> = {
     on(name: string, handler: EventHandler) {
       handlers.set(name, [...(handlers.get(name) ?? []), handler]);
     },
@@ -52,6 +53,9 @@ function createPiHarness() {
     registerTool(definition: ToolDefinition) {
       tools.set(definition.name, definition);
     },
+    async sendUserMessage(content: string) {
+      sentUserMessages.push(content);
+    },
   };
 
   sideshowExtension(pi);
@@ -59,6 +63,7 @@ function createPiHarness() {
   return {
     tools,
     commands,
+    sentUserMessages,
     eventNames: [...handlers.keys()],
     async emit(name: string, ctx: ReturnType<typeof createContext>) {
       for (const handler of handlers.get(name) ?? []) await handler({}, ctx);
@@ -266,7 +271,9 @@ test(
       ],
     );
     assert.deepEqual([...harness.commands.keys()], ["sideshow"]);
-    assert.deepEqual(harness.eventNames, ["session_start", "turn_end"]);
+    // session_shutdown only appears while the Pi inbox poller is enabled
+    // (SIDESHOW_PI_INBOX unset = enabled).
+    assert.deepEqual(harness.eventNames, ["session_start", "session_shutdown", "turn_end"]);
     assert.deepEqual(harness.tool("sideshow_publish_surface").parameters.required, [
       "title",
       "parts",
@@ -650,3 +657,91 @@ test(
     await reconstructed.emit("turn_end", reconstructedCtx);
   },
 );
+
+test("viewer comments reach the agent through the Pi inbox", { timeout: 15_000 }, async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "sideshow-pi-inbox-"));
+  const originalEnv = {
+    url: process.env.SIDESHOW_URL,
+    token: process.env.SIDESHOW_TOKEN,
+    session: process.env.SIDESHOW_SESSION,
+    inbox: process.env.SIDESHOW_PI_INBOX,
+  };
+  const server = await startServer(dir);
+  let serverClosed = false;
+  let harness: ReturnType<typeof createPiHarness> | undefined;
+
+  process.env.SIDESHOW_URL = `${server.url}/`;
+  process.env.SIDESHOW_TOKEN = "test-token";
+  delete process.env.SIDESHOW_SESSION;
+  delete process.env.SIDESHOW_PI_INBOX;
+
+  t.after(async () => {
+    try {
+      await harness?.emit("session_shutdown", createContext(dir));
+      if (!serverClosed) await server.close();
+    } catch {
+      // best effort — the assertions below carry the result
+    } finally {
+      try {
+        rmSync(dir, { recursive: true, force: true });
+      } finally {
+        for (const [key, value] of Object.entries(originalEnv)) {
+          const envName = `SIDESHOW_${key.toUpperCase()}`;
+          if (value === undefined) delete process.env[envName];
+          else process.env[envName] = value;
+        }
+      }
+    }
+  });
+
+  // Server side: a session, a card, and a viewer comment (enters the Pi inbox).
+  const session = await postJson(`${server.url}/api/sessions`, { agent: "inbox-pi" });
+  const post = await postJson(`${server.url}/api/posts`, {
+    session: session.id,
+    title: "Inbox card",
+    surfaces: [{ kind: "html", html: "<p>hello</p>" }],
+  });
+  await postJson(`${server.url}/api/comments`, {
+    surface: post.id,
+    author: "user",
+    text: "make the text bold",
+  });
+
+  // Point the extension at this viewer session, then load it: the immediate
+  // first poll must claim the pending comment and hand it to the agent.
+  process.env.SIDESHOW_SESSION = session.id;
+  harness = createPiHarness();
+
+  const deadline = Date.now() + 5000;
+  while (harness.sentUserMessages.length === 0 && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  assert.equal(harness.sentUserMessages.length, 1, "exactly one delivery");
+  const delivered = harness.sentUserMessages[0];
+  assert.match(delivered, /Inbox card/);
+  assert.match(delivered, /make the text bold/);
+  assert.match(delivered, /sideshow_update_surface/);
+  assert.match(delivered, /sideshow_reply_to_user/);
+
+  // The claim persisted server-side: inbox empty, comment delivered.
+  const inbox = (await fetch(`${server.url}/api/pi/inbox?session=${session.id}`, {
+    headers: { authorization: "Bearer test-token" },
+  }).then((r) => r.json())) as Array<{ pi?: { status: string } }>;
+  assert.deepEqual(inbox, []);
+  const thread = (await fetch(`${server.url}/api/comments?surface=${post.id}`, {
+    headers: { authorization: "Bearer test-token" },
+  }).then((r) => r.json())) as { comments: Array<{ pi?: { status: string } }> };
+  assert.equal(thread.comments.at(-1)?.pi?.status, "delivered");
+});
+
+test("SIDESHOW_PI_INBOX=0 disables the inbox poller", { timeout: 10_000 }, async () => {
+  const previous = process.env.SIDESHOW_PI_INBOX;
+  process.env.SIDESHOW_PI_INBOX = "0";
+  try {
+    const harness = createPiHarness();
+    assert.deepEqual(harness.eventNames, ["session_start", "turn_end"]);
+  } finally {
+    if (previous === undefined) delete process.env.SIDESHOW_PI_INBOX;
+    else process.env.SIDESHOW_PI_INBOX = previous;
+  }
+});
