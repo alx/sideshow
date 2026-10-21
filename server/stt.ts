@@ -12,17 +12,11 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 
 const PI_NPM_MODULES =
-  process.env.PI_AGENT_NPM_MODULES ??
-  join(homedir(), ".pi", "agent", "npm", "node_modules");
+  process.env.PI_AGENT_NPM_MODULES ?? join(homedir(), ".pi", "agent", "npm", "node_modules");
 const MODEL_DIR =
   process.env.SIDESHOW_STT_MODEL_DIR ?? join(homedir(), ".pi", "models", "parakeet-v3");
 
-const MODEL_FILES = [
-  "encoder.int8.onnx",
-  "decoder.int8.onnx",
-  "joiner.int8.onnx",
-  "tokens.txt",
-];
+const MODEL_FILES = ["encoder.int8.onnx", "decoder.int8.onnx", "joiner.int8.onnx", "tokens.txt"];
 
 export function sttAvailable(): boolean {
   try {
@@ -76,15 +70,11 @@ export async function getRecognizer(): Promise<any> {
 function pcmToFloat32(pcm: Buffer): Float32Array {
   const numSamples = Math.floor(pcm.length / 2);
   const float32 = new Float32Array(numSamples);
-  if ((pcm.byteOffset & 1) !== 0) {
-    for (let i = 0; i < numSamples; i++) {
-      float32[i] = pcm.readInt16LE(i * 2) / 32768.0;
-    }
-    return float32;
-  }
-  const int16 = new Int16Array(pcm.buffer, pcm.byteOffset, numSamples);
+  // DataView handles arbitrary (incl. odd) byteOffsets; @types/node 25 dropped
+  // readInt16LE from the generic Buffer, so avoid Buffer byte-read methods here.
+  const view = new DataView(pcm.buffer, pcm.byteOffset, pcm.length);
   for (let i = 0; i < numSamples; i++) {
-    float32[i] = int16[i] / 32768.0;
+    float32[i] = view.getInt16(i * 2, true) / 32768.0;
   }
   return float32;
 }
