@@ -740,6 +740,8 @@ export function createApp({
       author,
       text: input.text.trim().slice(0, MAX_COMMENT_TEXT),
       anchor: sanitizeCommentAnchor(input.anchor, post),
+      // Viewer comments enter the Pi inbox; agent/surface writes never do.
+      startInbox: author === "user",
     });
     if (!comment) return { error: "session not found", status: 404 };
     bus.broadcast({
@@ -749,6 +751,12 @@ export function createApp({
       surfaceId: comment.postId,
       seq: comment.seq,
     });
+    // An agent reply in a thread answers the Pi-inbox items of that post.
+    // (Surface-published comments are not agent replies and do not answer.)
+    if (author !== "user" && author !== "surface") {
+      await store.answerPiInboxPost(post.id);
+      bus.broadcast({ type: "comment-updated", id: post.id, sessionId: post.sessionId });
+    }
     // agent replies are writes too — piggyback pending feedback on them, but
     // never on the user's own comments
     const userFeedback = author === "user" ? undefined : await collectFeedback(comment.sessionId);
@@ -1798,6 +1806,30 @@ export function createApp({
     if (!comment) return c.json({ error: "comment not found" }, 404);
     bus.broadcast({ type: "comment-deleted", id: comment.id, sessionId: comment.sessionId });
     return c.json({ ok: true });
+  });
+
+  // --- Pi inbox: viewer comments queued for the bound Pi session ---
+  // Mirrors the voice-inbox claim pattern. Viewer comments (author=user) enter
+  // the inbox pending; a Pi claims one (pending -> delivered, 409 after) and
+  // answers the thread (delivered -> answered) by replying in the same post.
+
+  app.get("/api/pi/inbox", async (c) => {
+    const sessionId = c.req.query("session");
+    if (!sessionId) return c.json({ error: "session required" }, 400);
+    return c.json(await store.listPiInbox(sessionId));
+  });
+
+  app.post("/api/pi/inbox/:id/deliver", async (c) => {
+    const body = (await c.req.json().catch(() => ({}))) as { client?: unknown };
+    const client = typeof body?.client === "string" ? body.client : undefined;
+    const comment = await store.claimPiInbox(c.req.param("id"), client);
+    if (!comment) return c.json({ error: "comment not pending" }, 409);
+    bus.broadcast({
+      type: "comment-updated",
+      id: comment.postId ?? comment.id,
+      sessionId: comment.sessionId,
+    });
+    return c.json(comment);
   });
 
   // The viewer's update notice: running version vs latest published release.

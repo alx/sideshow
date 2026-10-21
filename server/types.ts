@@ -301,6 +301,15 @@ export interface Comment {
   // area/line. It is data only: render with text/positioned elements in the
   // trusted viewer, never as HTML.
   anchor?: CommentAnchor;
+  // Pi-inbox lifecycle for viewer comments (author=user): queued for delivery
+  // to the bound Pi session, claimed by exactly one Pi, answered when the
+  // agent replies in the same thread. Absent on non-inbox comments.
+  pi?: {
+    status: "pending" | "delivered" | "answered";
+    deliveredBy?: string;
+    deliveredAt?: string;
+    answeredAt?: string;
+  };
 }
 
 // An uploaded blob (image, trace file, arbitrary file) the agent pushes once and
@@ -355,6 +364,8 @@ export interface CreateCommentInput {
   author: string;
   text: string;
   anchor?: CommentAnchor;
+  /** Start this comment in the Pi inbox (pending). Viewer-origin comments only. */
+  startInbox?: boolean;
 }
 
 export interface CommentQuery {
@@ -398,6 +409,13 @@ export interface Store {
   listComments(query: CommentQuery): Promise<Comment[]>;
   createComment(input: CreateCommentInput): Promise<Comment | null>;
   removeComment(id: string): Promise<Comment | null>;
+  // Pi inbox: viewer comments queued for the bound Pi session, oldest first.
+  listPiInbox(sessionId: string): Promise<Comment[]>;
+  // Atomically claim a pending inbox comment (pending -> delivered).
+  // Returns null when the id is unknown or no longer pending (the caller 409s).
+  claimPiInbox(id: string, client?: string): Promise<Comment | null>;
+  // An agent reply landed on this post: mark its open inbox comments answered.
+  answerPiInboxPost(postId: string): Promise<void>;
 
   // Session-scoped agent trace: the steps that produced a session's surfaces,
   // synced from the transcript. setTrace replaces the whole list (windowed

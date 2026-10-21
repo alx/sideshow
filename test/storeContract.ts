@@ -726,6 +726,121 @@ export function runStoreContract(name: string, makeStore: () => Store | Promise<
     assert.deepEqual(await store.listComments({ sessionId: "missing" }), []);
   });
 
+  // --- Pi inbox ---
+
+  contract("starts viewer comments in the Pi inbox, not agent writes", async (store) => {
+    const s = await store.createSession({ agent: "pi" });
+    const post = await store.createPost({
+      sessionId: s.id,
+      surfaces: [htmlSurface("<p>x</p>")],
+    });
+
+    const user = await store.createComment({
+      sessionId: s.id,
+      postId: post?.id,
+      author: "user",
+      text: "viewer msg",
+      startInbox: true,
+    });
+    const agent = await store.createComment({
+      sessionId: s.id,
+      postId: post?.id,
+      author: "pi",
+      text: "agent write",
+    });
+
+    assert.equal(user?.pi?.status, "pending");
+    assert.equal(agent?.pi, undefined);
+
+    const inbox = await store.listPiInbox(s.id);
+    assert.deepEqual(
+      inbox.map((c) => c.text),
+      ["viewer msg"],
+    );
+    // another session's inbox is empty even if it had its own user comments
+    const other = await store.createSession({ agent: "pi" });
+    assert.deepEqual(await store.listPiInbox(other?.id ?? ""), []);
+  });
+
+  contract("claim is atomic: first wins, second gets null", async (store) => {
+    const s = await store.createSession({ agent: "pi" });
+    const post = await store.createPost({
+      sessionId: s.id,
+      surfaces: [htmlSurface("<p>x</p>")],
+    });
+    const c = await store.createComment({
+      sessionId: s.id,
+      postId: post?.id,
+      author: "user",
+      text: "claim me",
+      startInbox: true,
+    });
+
+    const first = await store.claimPiInbox(c?.id ?? "", "pi-A");
+    assert.equal(first?.pi?.status, "delivered");
+    assert.equal(first?.pi?.deliveredBy, "pi-A");
+    assert.ok(first?.pi?.deliveredAt);
+
+    // second claimant (same or other Pi) loses
+    const second = await store.claimPiInbox(c?.id ?? "", "pi-B");
+    assert.equal(second, null);
+    // unknown id
+    assert.equal(await store.claimPiInbox("nope", "pi-A"), null);
+    // dropped out of the inbox once delivered
+    assert.deepEqual(await store.listPiInbox(s.id), []);
+  });
+
+  contract("answer flips a post's open items to answered", async (store) => {
+    const s = await store.createSession({ agent: "pi" });
+    const postA = await store.createPost({
+      sessionId: s.id,
+      surfaces: [htmlSurface("<p>a</p>")],
+    });
+    const postB = await store.createPost({
+      sessionId: s.id,
+      surfaces: [htmlSurface("<p>b</p>")],
+    });
+    const pendingOnA = await store.createComment({
+      sessionId: s.id,
+      postId: postA?.id,
+      author: "user",
+      text: "pending on A",
+      startInbox: true,
+    });
+    const deliveredOnA = await store.createComment({
+      sessionId: s.id,
+      postId: postA?.id,
+      author: "user",
+      text: "delivered on A",
+      startInbox: true,
+    });
+    const pendingOnB = await store.createComment({
+      sessionId: s.id,
+      postId: postB?.id,
+      author: "user",
+      text: "pending on B",
+      startInbox: true,
+    });
+    await store.claimPiInbox(deliveredOnA?.id ?? "", "pi-A");
+
+    await store.answerPiInboxPost(postA?.id ?? "");
+
+    const byId = Object.fromEntries(
+      (await store.listComments({ sessionId: s.id })).map((c) => [c.id, c]),
+    );
+    assert.equal(byId[pendingOnA!.id]?.pi?.status, "answered");
+    assert.equal(byId[deliveredOnA!.id]?.pi?.status, "answered");
+    assert.ok(byId[deliveredOnA!.id]?.pi?.answeredAt);
+    // other post untouched
+    assert.equal(byId[pendingOnB!.id]?.pi?.status, "pending");
+    // answering an already-answered post is a no-op (no throw)
+    await store.answerPiInboxPost(postA?.id ?? "");
+    assert.deepEqual(
+      (await store.listPiInbox(s.id)).map((c) => c.text),
+      ["pending on B"],
+    );
+  });
+
   // --- trace ---
 
   contract("stores, replaces, and reads back a session trace", async (store) => {

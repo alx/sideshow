@@ -60,7 +60,8 @@ export class SqlStore implements Store {
       CREATE TABLE IF NOT EXISTS comments (
         seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL,
         sessionId TEXT NOT NULL, postId TEXT, postTitle TEXT,
-        author TEXT NOT NULL, text TEXT NOT NULL, createdAt TEXT NOT NULL
+        author TEXT NOT NULL, text TEXT NOT NULL, createdAt TEXT NOT NULL,
+        piStatus TEXT, piMeta TEXT
       );
       CREATE TABLE IF NOT EXISTS assets (
         id TEXT PRIMARY KEY, sessionId TEXT NOT NULL, kind TEXT NOT NULL,
@@ -85,6 +86,12 @@ export class SqlStore implements Store {
     const commentCols = this.sql.exec("SELECT name FROM pragma_table_info('comments')").toArray();
     if (!commentCols.some((c) => c.name === "anchor")) {
       this.sql.exec("ALTER TABLE comments ADD COLUMN anchor TEXT");
+    }
+    if (!commentCols.some((c) => c.name === "piStatus")) {
+      this.sql.exec("ALTER TABLE comments ADD COLUMN piStatus TEXT");
+    }
+    if (!commentCols.some((c) => c.name === "piMeta")) {
+      this.sql.exec("ALTER TABLE comments ADD COLUMN piMeta TEXT");
     }
     const postCols = this.sql.exec("SELECT name FROM pragma_table_info('posts')").toArray();
     if (!postCols.some((c) => c.name === "jobId")) {
@@ -285,6 +292,19 @@ export class SqlStore implements Store {
         anchor = undefined;
       }
     }
+    let pi: Comment["pi"] | undefined;
+    if (typeof r.piStatus === "string" && r.piStatus) {
+      const meta =
+        typeof r.piMeta === "string" && r.piMeta
+          ? (JSON.parse(r.piMeta) as Record<string, unknown>)
+          : {};
+      pi = {
+        status: r.piStatus as NonNullable<Comment["pi"]>["status"],
+        ...(typeof meta.deliveredBy === "string" && { deliveredBy: meta.deliveredBy }),
+        ...(typeof meta.deliveredAt === "string" && { deliveredAt: meta.deliveredAt }),
+        ...(typeof meta.answeredAt === "string" && { answeredAt: meta.answeredAt }),
+      };
+    }
     return {
       id: r.id as string,
       seq: r.seq as number,
@@ -295,6 +315,7 @@ export class SqlStore implements Store {
       text: r.text as string,
       createdAt: r.createdAt as string,
       ...(anchor && { anchor }),
+      ...(pi && { pi }),
     };
   }
 
@@ -546,8 +567,9 @@ export class SqlStore implements Store {
     const createdAt = new Date().toISOString();
     const author = stripNul(input.author).trim() || "user";
     const text = stripNul(input.text);
+    const pi = input.startInbox ? { status: "pending" as const } : undefined;
     this.sql.exec(
-      "INSERT INTO comments (id, sessionId, postId, postTitle, author, text, createdAt, anchor) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+      "INSERT INTO comments (id, sessionId, postId, postTitle, author, text, createdAt, anchor, piStatus, piMeta) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
       id,
       input.sessionId,
       post?.id ?? null,
@@ -556,6 +578,8 @@ export class SqlStore implements Store {
       text,
       createdAt,
       input.anchor ? JSON.stringify(input.anchor) : null,
+      pi ? pi.status : null,
+      null,
     );
     const seq = this.sql.exec("SELECT last_insert_rowid() AS seq").one().seq as number;
     this.touch(input.sessionId);
@@ -569,6 +593,7 @@ export class SqlStore implements Store {
       text,
       createdAt,
       ...(input.anchor && { anchor: input.anchor }),
+      ...(pi && { pi }),
     };
   }
 
@@ -579,6 +604,51 @@ export class SqlStore implements Store {
     this.sql.exec("DELETE FROM comments WHERE id = ?", id);
     this.touch(comment.sessionId);
     return comment;
+  }
+
+  async listPiInbox(sessionId: string) {
+    return this.sql
+      .exec(
+        `SELECT * FROM comments
+         WHERE sessionId = ? AND author = 'user' AND piStatus = 'pending'
+         ORDER BY seq ASC`,
+        sessionId,
+      )
+      .toArray()
+      .map((r) => this.rowToComment(r));
+  }
+
+  async claimPiInbox(id: string, client?: string) {
+    // SqlStorage.exec exposes no rowcount (Cloudflare parity), so the claim is
+    // proven by a unique token: the conditional UPDATE only matches pending
+    // rows, and exactly one caller's token ends up in the column.
+    const token = newId();
+    const meta = JSON.stringify({
+      token,
+      ...(client ? { deliveredBy: client } : {}),
+      deliveredAt: new Date().toISOString(),
+    });
+    this.sql.exec(
+      `UPDATE comments SET piStatus = 'delivered', piMeta = ?
+       WHERE id = ? AND author = 'user' AND piStatus = 'pending'`,
+      meta,
+      id,
+    );
+    const rows = this.sql.exec("SELECT piMeta FROM comments WHERE id = ?", id).toArray();
+    if (rows.length === 0 || rows[0].piMeta !== meta) return null;
+    const full = this.sql.exec("SELECT * FROM comments WHERE id = ?", id).one();
+    return this.rowToComment(full);
+  }
+
+  async answerPiInboxPost(postId: string) {
+    const now = new Date().toISOString();
+    this.sql.exec(
+      `UPDATE comments SET piStatus = 'answered',
+               piMeta = json_set(COALESCE(piMeta, '{}'), '$.answeredAt', ?)
+       WHERE postId = ? AND piStatus IN ('pending', 'delivered')`,
+      now,
+      postId,
+    );
   }
 
   // --- trace ---

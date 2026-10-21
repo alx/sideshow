@@ -459,6 +459,7 @@ export class JsonFileStore implements Store {
       text: stripNul(input.text),
       createdAt: new Date().toISOString(),
       ...(input.anchor && { anchor: input.anchor }),
+      ...(input.startInbox && { pi: { status: "pending" as const } }),
     };
     this.comments.push(comment);
     this.touch(input.sessionId);
@@ -474,6 +475,41 @@ export class JsonFileStore implements Store {
     this.touch(comment.sessionId);
     await this.persist();
     return clone(comment);
+  }
+
+  async listPiInbox(sessionId: string) {
+    await this.load();
+    return this.comments
+      .filter((c) => c.sessionId === sessionId && c.author === "user" && c.pi?.status === "pending")
+      .map(clone);
+  }
+
+  async claimPiInbox(id: string, client?: string) {
+    await this.load();
+    const comment = this.comments.find((c) => c.id === id);
+    if (!comment || comment.author !== "user" || comment.pi?.status !== "pending") {
+      return null;
+    }
+    comment.pi = {
+      status: "delivered",
+      ...(client ? { deliveredBy: client } : {}),
+      deliveredAt: new Date().toISOString(),
+    };
+    await this.persist();
+    return clone(comment);
+  }
+
+  async answerPiInboxPost(postId: string) {
+    await this.load();
+    const now = new Date().toISOString();
+    let changed = false;
+    for (const c of this.comments) {
+      if (c.postId === postId && c.pi && c.pi.status !== "answered") {
+        c.pi = { ...c.pi, status: "answered", answeredAt: now };
+        changed = true;
+      }
+    }
+    if (changed) await this.persist();
   }
 
   // --- trace ---

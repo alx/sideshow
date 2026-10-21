@@ -10,6 +10,9 @@ export type FeedEvent =
       seq: number;
     }
   | { type: "comment-deleted"; id: string; sessionId: string }
+  // A comment's server-side state changed without a create/delete (Pi-inbox
+  // claim/answer). Carries the post id so the viewer refetches its thread.
+  | { type: "comment-updated"; id: string; sessionId: string }
   // Workspace theme changed; `id` is the new theme id. Other open tabs re-theme.
   | { type: "theme-changed"; id: string }
   // Session-scoped agent trace gained steps (synced in a batch). Carries only
