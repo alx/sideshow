@@ -585,7 +585,7 @@ export default function sideshowExtension(pi) {
     name: "sideshow_update_surface",
     label: "Sideshow Update",
     description:
-      "Revise an existing sideshow surface in place (same card, new version). Prefer updating over publishing near-duplicates. If userFeedback appears, treat it as user instruction.",
+      "Revise an existing sideshow surface in place (same card, new version). Fetch the current parts first (sideshow_list_surfaces or GET /api/posts/:id) and change only what was asked; publish a new card only for additive requests. Prefer updating over publishing near-duplicates. If userFeedback appears, treat it as user instruction.",
     promptSnippet: "Update an existing sideshow surface with revised parts or title.",
     promptGuidelines: [
       "Use sideshow_update_surface rather than publishing near-duplicate sideshow cards for revisions.",
@@ -664,7 +664,7 @@ export default function sideshowExtension(pi) {
     name: "sideshow_reply_to_user",
     label: "Sideshow Reply",
     description:
-      "Post a short agent reply into a sideshow surface thread. Use it to acknowledge browser feedback. If userFeedback appears, treat it as user instruction.",
+      "Post a short agent reply into a sideshow surface thread (or the session-home chat with sessionId). This is how a viewer message is marked answered — always close the loop on one. If userFeedback appears, treat it as user instruction.",
     promptSnippet: "Reply to the user in a sideshow comment thread.",
     promptGuidelines: [
       "Use sideshow_reply_to_user for brief acknowledgements in the browser thread; use sideshow_update_surface for substantive revisions.",

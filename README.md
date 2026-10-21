@@ -184,6 +184,9 @@ browser, so the action is shown but disabled.
 - **[Browser microphone over HTTPS](docs/browser-mic.md)** — serve the viewer
   over HTTPS so push-to-talk records the mic of the device viewing it
   (includes `contrib/tls-proxy.js`).
+- **[Viewer ↔ Pi chat](docs/viewer-chat.md)** — the text loop: comment in the
+  browser, the bound Pi session picks it up, revises the card, and replies in
+  the thread.
 - **[AGENTS.md](AGENTS.md)** — architecture and contributor guide.
 - **Terminal surface (alpha).** [`sideshow-term/`](sideshow-term/) is an early
   sibling that renders to a TUI instead of the browser. APIs are unstable.
